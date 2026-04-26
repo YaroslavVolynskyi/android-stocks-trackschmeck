@@ -1,26 +1,23 @@
 package com.fin.trackshmeck.data.repository
 
+import android.util.Log
+import com.fin.trackshmeck.data.datasource.FirebaseDataSource
 import com.fin.trackshmeck.data.datasource.StockRemoteDataSource
 import com.fin.trackshmeck.data.local.WatchlistDao
 import com.fin.trackshmeck.data.local.WatchlistItemEntity
 import com.fin.trackshmeck.data.model.WatchlistItem
 import com.fin.trackshmeck.data.model.toWatchlistItem
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 
 class StockRepositoryImpl @Inject constructor(
     private val dao: WatchlistDao,
     private val remoteDataSource: StockRemoteDataSource,
+    private val firebaseDataSource: FirebaseDataSource,
 ) : StockRepository {
-
-    companion object {
-        private val DEFAULT_TICKERS = listOf(
-            "VOO", "GLD", "NVDA", "AMZN", "JPM", "PPA",
-            "XLE", "XLU", "VXUS", "AVGO", "IXC", "FIG", "SGOV",
-        )
-    }
 
     override fun observeWatchlist(): Flow<List<WatchlistItem>> =
         dao.observeAll().map { entities -> entities.map { it.toWatchlistItem() } }
@@ -84,48 +81,62 @@ class StockRepositoryImpl @Inject constructor(
         dao.deleteById(id)
     }
 
-    override suspend fun refreshAll() {
+    override suspend fun refreshAll() = coroutineScope {
         val items = dao.getAll()
         for (entity in items) {
             if (entity.ticker.isBlank()) continue
-            try {
-                val quote = remoteDataSource.getQuote(entity.ticker)
-                val profile = remoteDataSource.getCompanyProfile(entity.ticker)
-                dao.update(
-                    entity.copy(
-                        currentPrice = quote.c,
-                        change = quote.d,
-                        percentChange = quote.dp,
-                        highPrice = quote.h,
-                        lowPrice = quote.l,
-                        openPrice = quote.o,
-                        previousClose = quote.pc,
-                        companyName = profile.name,
-                        country = profile.country,
-                        currency = profile.currency,
-                        exchange = profile.exchange,
-                        industry = profile.finnhubIndustry,
-                        ipoDate = profile.ipo,
-                        logoUrl = profile.logo,
-                        marketCap = profile.marketCapitalization,
-                        phone = profile.phone,
-                        sharesOutstanding = profile.shareOutstanding,
-                        webUrl = profile.weburl,
-                        lastUpdated = System.currentTimeMillis(),
-                        fetchError = null,
+            launch {
+                try {
+                    val quote = remoteDataSource.getQuote(entity.ticker)
+                    val profile = remoteDataSource.getCompanyProfile(entity.ticker)
+                    dao.update(
+                        entity.copy(
+                            currentPrice = quote.c,
+                            change = quote.d,
+                            percentChange = quote.dp,
+                            highPrice = quote.h,
+                            lowPrice = quote.l,
+                            openPrice = quote.o,
+                            previousClose = quote.pc,
+                            companyName = profile.name,
+                            country = profile.country,
+                            currency = profile.currency,
+                            exchange = profile.exchange,
+                            industry = profile.finnhubIndustry,
+                            ipoDate = profile.ipo,
+                            logoUrl = profile.logo,
+                            marketCap = profile.marketCapitalization,
+                            phone = profile.phone,
+                            sharesOutstanding = profile.shareOutstanding,
+                            webUrl = profile.weburl,
+                            lastUpdated = System.currentTimeMillis(),
+                            fetchError = null,
+                        )
                     )
-                )
-            } catch (e: Exception) {
-                dao.update(entity.copy(fetchError = e.message))
+                } catch (e: Exception) {
+                    dao.update(entity.copy(fetchError = e.message))
+                }
             }
-            delay(200) // Rate limiting: ~5 items/sec, 2 calls each = 10 calls/sec (under 30/sec limit)
         }
     }
 
     override suspend fun prepopulateIfEmpty() {
         if (dao.count() > 0) return
-        for (ticker in DEFAULT_TICKERS) {
-            dao.insert(WatchlistItemEntity(ticker = ticker))
+        try {
+            val tickers = firebaseDataSource.fetchTickers()
+            Log.d("StockRepo", "Fetched ${tickers.size} tickers from Firebase")
+            for (item in tickers) {
+                dao.insert(WatchlistItemEntity(ticker = item.ticker, quantity = item.quantity))
+            }
+        } catch (e: Exception) {
+            Log.e("StockRepo", "Firebase fetch failed, using defaults", e)
+            val defaults = listOf(
+                "VOO", "GLD", "NVDA", "AMZN", "JPM", "PPA",
+                "XLE", "XLU", "VXUS", "AVGO", "IXC", "FIG", "SGOV",
+            )
+            for (ticker in defaults) {
+                dao.insert(WatchlistItemEntity(ticker = ticker))
+            }
         }
     }
 }
